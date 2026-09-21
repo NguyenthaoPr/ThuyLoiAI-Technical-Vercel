@@ -1438,14 +1438,90 @@ function buildQuickReportHtml(){
   const latestText=a.latest?`${formatNumber(a.latest.value)} m tại ${fmtReportDate(a.latest.time)}`:'—';
   const firstText=a.first?`${formatNumber(a.first.value)} m tại ${fmtReportDate(a.first.time)}`:'—';
   // Toàn bộ dãy số liệu quan trắc hợp lệ trong khoảng thời gian người dùng chọn.
+  // Ghép thêm lượng mưa theo thời điểm quan trắc mực nước.
+  const rainAtTime = new Map();
+  (Array.isArray(d.rainfall) ? d.rainfall : []).forEach(series => {
+    (Array.isArray(series.data) ? series.data : []).forEach(p => {
+      const t = parseDataTime(p.time);
+      const v = Number(p.value);
+      if (!t || !Number.isFinite(t.getTime()) || !Number.isFinite(v)) return;
+      const key = t.getTime();
+      rainAtTime.set(key, (rainAtTime.get(key) || 0) + v);
+    });
+  });
+
+  // Nếu thời điểm mưa và mực nước không trùng tuyệt đối, tìm số liệu mưa gần nhất
+  // trong cửa sổ ±30 phút. Không dùng giá trị ngoài cửa sổ này để tránh ghép sai kỳ đo.
+  const rainPointsForReport = [];
+  (Array.isArray(d.rainfall) ? d.rainfall : []).forEach(series => {
+    (Array.isArray(series.data) ? series.data : []).forEach(p => {
+      const time = parseDataTime(p.time);
+      const value = Number(p.value);
+      if (time && Number.isFinite(time.getTime()) && Number.isFinite(value)) {
+        rainPointsForReport.push({time, value});
+      }
+    });
+  });
+  rainPointsForReport.sort((a,b) => a.time - b.time);
+
+  function rainfallForObservation(time) {
+    if (!(time instanceof Date) || !Number.isFinite(time.getTime())) return null;
+    const exact = rainAtTime.get(time.getTime());
+    if (Number.isFinite(exact)) return exact;
+
+    const MAX_DIFF = 30 * 60 * 1000;
+    let bestDiff = Infinity;
+    let bestTime = null;
+    rainPointsForReport.forEach(p => {
+      const diff = Math.abs(p.time - time);
+      if (diff <= MAX_DIFF && diff < bestDiff) {
+        bestDiff = diff;
+        bestTime = p.time.getTime();
+      }
+    });
+    if (bestTime === null) return null;
+
+    // Cộng các chuỗi mưa có cùng thời điểm gần nhất.
+    return rainPointsForReport
+      .filter(p => p.time.getTime() === bestTime)
+      .reduce((sum,p) => sum + p.value, 0);
+  }
+
   const observationRows = a.pts.map((p, i) => {
     const prev = i > 0 ? a.pts[i - 1] : null;
     const hours = prev ? (p.time - prev.time) / 3600000 : null;
     const delta = prev ? p.value - prev.value : null;
     const rate = (prev && hours > 0) ? delta / hours : null;
-    return `<tr><td>${i + 1}</td><td>${escapeHtml(fmtReportDate(p.time))}</td><td>${formatNumber(p.value)} m</td><td>${delta === null ? '—' : (delta >= 0 ? '+' : '') + formatNumber(delta) + ' m'}</td><td>${hours === null ? '—' : formatNumber(hours, 1) + ' giờ'}</td><td>${rate === null ? '—' : (rate >= 0 ? '+' : '') + formatNumber(rate, 3) + ' m/giờ'}</td></tr>`;
+    const rain = rainfallForObservation(p.time);
+
+    return `<tr>
+      <td>${i + 1}</td>
+      <td>${escapeHtml(fmtReportDate(p.time))}</td>
+      <td>${formatNumber(p.value)} m</td>
+      <td>${rain === null ? '—' : formatNumber(rain) + ' mm'}</td>
+      <td>${delta === null ? '—' : (delta >= 0 ? '+' : '') + formatNumber(delta) + ' m'}</td>
+      <td>${hours === null ? '—' : formatNumber(hours, 1) + ' giờ'}</td>
+      <td>${rate === null ? '—' : (rate >= 0 ? '+' : '') + formatNumber(rate, 3) + ' m/giờ'}</td>
+    </tr>`;
   }).join('');
-  const observationTable = a.pts.length ? `<table class="observation-table"><thead><tr><th>STT</th><th>Thời gian quan trắc</th><th>Mực nước H</th><th>ΔH so với lần trước</th><th>Khoảng cách đo</th><th>Tốc độ biến đổi</th></tr></thead><tbody>${observationRows}</tbody></table><p class="note">Dãy số liệu gồm toàn bộ các lần quan trắc mực nước hợp lệ trong khoảng thời gian đã chọn. ΔH và tốc độ biến đổi được tính từ hai lần quan trắc liên tiếp.</p>` : '<p>Không có số liệu quan trắc hợp lệ trong khoảng thời gian đã chọn.</p>';
+
+  const observationTable = a.pts.length ? `
+    <table class="observation-table">
+      <thead>
+        <tr>
+          <th>STT</th>
+          <th>Thời gian quan trắc</th>
+          <th>Mực nước H</th>
+          <th>Lượng mưa</th>
+          <th>ΔH so với lần trước</th>
+          <th>Khoảng cách đo</th>
+          <th>Tốc độ biến đổi</th>
+        </tr>
+      </thead>
+      <tbody>${observationRows}</tbody>
+    </table>
+    <p class="note">Dãy số liệu gồm toàn bộ các lần quan trắc mực nước hợp lệ trong khoảng thời gian đã chọn và lượng mưa tương ứng. Lượng mưa được ưu tiên ghép đúng thời điểm; nếu thời gian không trùng tuyệt đối, hệ thống chỉ lấy lần đo mưa gần nhất trong phạm vi ±30 phút. ΔH và tốc độ biến đổi được tính từ hai lần quan trắc mực nước liên tiếp.</p>
+  ` : '<p>Không có số liệu quan trắc hợp lệ trong khoảng thời gian đã chọn.</p>';
 
   const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.45;color:#111}h1{text-align:center;font-size:17pt;margin:0 0 8px}h2{font-size:13pt;margin:16px 0 6px;border-bottom:1px solid #777;padding-bottom:3px}p{margin:5px 0}table{border-collapse:collapse;width:100%;margin:7px 0}th,td{border:1px solid #777;padding:6px;text-align:left;vertical-align:top}th{font-weight:bold;background:#eee}.observation-table{font-size:9.5pt}.observation-table th,.observation-table td{padding:4px 5px}.observation-table thead{display:table-header-group}.observation-table tr{page-break-inside:avoid}.meta td:first-child{width:28%;font-weight:bold}.note{font-style:italic;color:#444}.footer{margin-top:22px;font-size:9pt;color:#555}</style></head><body>
 <h1>BÁO CÁO NHANH DIỄN BIẾN MỰC NƯỚC – LƯỢNG MƯA</h1>
