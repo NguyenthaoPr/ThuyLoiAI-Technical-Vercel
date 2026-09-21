@@ -22,13 +22,13 @@ except ImportError:  # pragma: no cover
     GoogleAuthRequest = None
 
 # ============================================================
-# THUY LOI AI - TECHNICAL MODULE V2.8.1
+# THUY LOI AI - TECHNICAL MODULE V2.8.2
 # DIRECT GOOGLE SHEETS - KHONG DUNG APPS SCRIPT
 # Doc truc tiep AI_DATA bang Google Sheets API.
 # Khong ghi/sua/xoa du lieu Google Sheet.
 # ============================================================
 
-app = FastAPI(title="THUY LOI AI - Thong so ky thuat", version="2.8.1")
+app = FastAPI(title="THUY LOI AI - Thong so ky thuat", version="2.8.2")
 
 GOOGLE_SHEETS_ID = os.getenv(
     "GOOGLE_SHEETS_ID",
@@ -931,7 +931,7 @@ tbody tr{transition:background .15s}tbody tr:hover{background:color-mix(in srgb,
       <div id="quickReportActions" class="report-actions">
         <button class="ghost-btn report-btn" onclick="previewQuickReport()">👁️ Xem trước</button>
         <button class="ghost-btn report-btn" onclick="shareQuickReportZalo()">💬 Gởi Zalo</button>
-        <button class="primary-btn report-btn" onclick="downloadQuickReportWord()">⬇️ Tải về</button>
+        <button class="primary-btn report-btn" onclick="downloadQuickReportPDF()">⬇️ Tải PDF</button>
       </div>
     </div>
   </section>
@@ -1461,22 +1461,25 @@ function reportPlainTextFromHtml(html){
   box.innerHTML=html;
   return (box.innerText||box.textContent||'').trim();
 }
-function exportFileStamp(){
-  const d=new Date();
+function exportFileStamp(date=new Date()){
+  // Tạo timestamp an toàn cho tên file, không dùng dấu \/ : * ? " < > |.
+  const d=(date instanceof Date&&!Number.isNaN(date.getTime()))?date:new Date();
   const pad=n=>String(n).padStart(2,'0');
   return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
-function reportFileName(){
-  const facility=currentData?.facility||f.value||'Cong_trinh';
-  const safeFacility=String(facility)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g,'')
+function sanitizeReportFilePart(value){
+  return String(value||'Cong_trinh')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
     .replace(/đ/g,'d').replace(/Đ/g,'D')
-    .replace(/[^a-zA-Z0-9 _-]/g,'_')
+    .replace(/[^a-zA-Z0-9 _-]+/g,'_')
     .replace(/\s+/g,'_')
     .replace(/_+/g,'_')
-    .replace(/^_+|_+$/g,'') || 'Cong_trinh';
-  return `Bao_cao_nhanh_${safeFacility}_${exportFileStamp()}.doc`;
+    .replace(/^[_-]+|[_-]+$/g,'')
+    .slice(0,90)||'Cong_trinh';
+}
+function reportFileName(ext='pdf'){
+  const facility=currentData?.facility||f.value||'Cong_trinh';
+  return `Bao_cao_nhanh_${sanitizeReportFilePart(facility)}_${exportFileStamp()}.${ext}`;
 }
 function requireQuickReport(){
   const html=buildQuickReportHtml();
@@ -1493,83 +1496,117 @@ function closeReportPreview(){
   document.getElementById('reportModal').classList.remove('show');
   document.body.style.overflow='';
 }
+function reportPlainTextFromHtml(html){
+  const box=document.createElement('div');
+  box.innerHTML=html;
+  return (box.innerText||box.textContent||'').trim();
+}
+async function loadHtml2Pdf(){
+  if(window.html2pdf)return window.html2pdf;
+  if(window.__thuyloiHtml2PdfPromise)return window.__thuyloiHtml2PdfPromise;
+  window.__thuyloiHtml2PdfPromise=new Promise((resolve,reject)=>{
+    const script=document.createElement('script');
+    script.src='https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
+    script.onload=()=>window.html2pdf?resolve(window.html2pdf):reject(new Error('Thư viện PDF không sẵn sàng.'));
+    script.onerror=()=>reject(new Error('Không tải được thư viện PDF. Kiểm tra kết nối Internet.'));
+    document.head.appendChild(script);
+  });
+  return window.__thuyloiHtml2PdfPromise;
+}
+function makePdfElement(html){
+  const wrapper=document.createElement('div');
+  wrapper.innerHTML=html;
+  const root=wrapper.querySelector('body')||wrapper;
+  root.style.background='#fff';
+  root.style.color='#111';
+  root.style.width='190mm';
+  root.style.padding='0';
+  root.style.margin='0 auto';
+  root.style.fontFamily='Arial, Helvetica, sans-serif';
+  root.style.fontSize='11pt';
+  root.style.lineHeight='1.45';
+  root.querySelectorAll('table').forEach(t=>{t.style.width='100%';t.style.borderCollapse='collapse';});
+  root.querySelectorAll('th,td').forEach(c=>{c.style.border='1px solid #777';c.style.padding='6px';});
+  return root;
+}
+async function downloadQuickReportPDF(){
+  const html=requireQuickReport();if(!html)return false;
+  const fileName=reportFileName('pdf');
+  try{
+    const html2pdf=await loadHtml2Pdf();
+    const holder=document.createElement('div');
+    holder.style.position='fixed';holder.style.left='-100000px';holder.style.top='0';
+    holder.style.width='190mm';holder.style.background='#fff';holder.style.zIndex='-1';
+    const el=makePdfElement(html);
+    holder.appendChild(el);document.body.appendChild(holder);
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    await html2pdf().set({
+      margin:[10,10,12,10],
+      filename:fileName,
+      image:{type:'jpeg',quality:0.96},
+      html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false},
+      jsPDF:{unit:'mm',format:'a4',orientation:'portrait',compress:true},
+      pagebreak:{mode:['css','legacy'],avoid:['tr','img','h1','h2','h3']}
+    }).from(el).save();
+    holder.remove();
+    return true;
+  }catch(err){
+    console.error('[THUYLOIAI] PDF export:',err);
+    try{
+      const w=window.open('','_blank','width=1000,height=900');
+      if(!w)throw new Error('Trình duyệt đang chặn Popup.');
+      w.document.open();
+      w.document.write(html.replace('</head>','<style>@page{size:A4;margin:12mm}body{background:#fff!important}</style></head>'));
+      w.document.close();
+      w.focus();
+      setTimeout(()=>w.print(),500);
+      alert('Không tạo được PDF tự động. Báo cáo đã mở ở chế độ in; chọn "Save as PDF/Lưu thành PDF" để lưu.');
+      return false;
+    }catch(fallbackErr){
+      alert('Không thể xuất PDF. '+(err?.message||'Vui lòng thử lại.'));
+      return false;
+    }
+  }
+}
 async function shareQuickReportZalo(){
   const html=requireQuickReport();if(!html)return;
   const text=reportPlainTextFromHtml(html);
-  const fileName=reportFileName();
-  const file=new File(['\ufeff',html],fileName,{type:'application/msword'});
-  const title='Báo cáo nhanh - '+(currentData?.facility||f.value||'');
-
-  // Điện thoại/trình duyệt có Web Share: cho phép chọn Zalo và gửi trực tiếp
-  // cả nội dung hoặc file nếu hệ điều hành hỗ trợ chia sẻ file.
   try{
-    if(typeof navigator.share==='function'){
-      if(typeof navigator.canShare==='function' && navigator.canShare({files:[file]})){
-        await navigator.share({title,text:'Báo cáo nhanh Thủy lợi',files:[file]});
-        return;
+    const html2pdf=await loadHtml2Pdf();
+    const holder=document.createElement('div');
+    holder.style.position='fixed';holder.style.left='-100000px';holder.style.top='0';holder.style.width='190mm';holder.style.background='#fff';
+    const el=makePdfElement(html);holder.appendChild(el);document.body.appendChild(holder);
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+    const blob=await html2pdf().set({margin:[10,10,12,10],filename:reportFileName('pdf'),image:{type:'jpeg',quality:.96},html2canvas:{scale:2,useCORS:true,backgroundColor:'#fff',logging:false},jsPDF:{unit:'mm',format:'a4',orientation:'portrait',compress:true},pagebreak:{mode:['css','legacy'],avoid:['tr','img','h1','h2','h3']}}).from(el).outputPdf('blob');
+    holder.remove();
+    const file=new File([blob],reportFileName('pdf'),{type:'application/pdf'});
+    if(navigator.share){
+      if(navigator.canShare&&navigator.canShare({files:[file]})){
+        await navigator.share({title:'Báo cáo nhanh - '+(currentData?.facility||f.value||''),text:'Báo cáo nhanh Thủy lợi',files:[file]});
+        return true;
       }
-      await navigator.share({title,text:text.slice(0,6000)});
-      return;
+      await navigator.share({title:'Báo cáo nhanh - '+(currentData?.facility||f.value||''),text:text.slice(0,6000)});
+      return true;
     }
+    // PC fallback: tải PDF, sao chép nội dung và mở Zalo Web.
+    const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=file.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1500);
+    try{if(navigator.clipboard&&window.isSecureContext)await navigator.clipboard.writeText(text.slice(0,10000));}catch(e){console.warn('Clipboard:',e)}
+    window.open('https://chat.zalo.me/','_blank','noopener,noreferrer');
+    return true;
   }catch(err){
-    if(err&&err.name==='AbortError')return;
-    console.warn('Web Share không khả dụng:',err);
-  }
-
-  // Desktop: trình duyệt không được phép tự động gửi tin nhắn/file vào
-  // tài khoản Zalo. Chuẩn bị file + sao chép nội dung + mở Zalo Web.
-  try{
-    const blob=new Blob(['\ufeff',html],{type:'application/msword;charset=utf-8'});
-    const url=URL.createObjectURL(blob);
-    const link=document.createElement('a');
-    link.href=url;link.download=fileName;
-    document.body.appendChild(link);link.click();link.remove();
-    setTimeout(()=>URL.revokeObjectURL(url),1000);
-  }catch(err){
-    console.warn('Không thể chuẩn bị file báo cáo:',err);
-  }
-
-  let copied=false;
-  try{
-    if(navigator.clipboard&&window.isSecureContext){
-      await navigator.clipboard.writeText(text.slice(0,10000));
-      copied=true;
-    }else{
-      const ta=document.createElement('textarea');
-      ta.value=text.slice(0,10000);
-      ta.style.position='fixed';ta.style.left='-9999px';
-      document.body.appendChild(ta);ta.select();
-      copied=document.execCommand('copy');
-      ta.remove();
-    }
-  }catch(err){console.warn('Clipboard không khả dụng:',err)}
-
-  window.open('https://chat.zalo.me/','_blank','noopener,noreferrer');
-  alert(copied
-    ? 'Đã tải Báo cáo và sao chép nội dung. Zalo Web đã được mở — chọn người nhận rồi dán nội dung hoặc đính kèm file báo cáo để gửi.'
-    : 'Đã tải Báo cáo và mở Zalo Web. Hãy chọn người nhận rồi đính kèm file báo cáo hoặc sao chép nội dung để gửi.');
-}
-function downloadQuickReportWord(){
-  const html=requireQuickReport();if(!html)return;
-  try{
-    const fileName=reportFileName();
-    const blob=new Blob(['\ufeff',html],{type:'application/msword;charset=utf-8'});
-    const url=URL.createObjectURL(blob);
-    const link=document.createElement('a');
-    link.href=url;
-    link.download=fileName;
-    link.style.display='none';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(()=>URL.revokeObjectURL(url),1500);
-  }catch(err){
-    console.error('Tải Báo cáo nhanh thất bại:',err);
-    alert('Không thể tạo file Báo cáo nhanh trên trình duyệt này.');
+    console.error('[THUYLOIAI] Zalo/PDF:',err);
+    alert('Không thể tạo PDF để chia sẻ. Bạn có thể dùng nút Tải PDF rồi gửi file PDF qua Zalo.');
+    return false;
   }
 }
-// Giữ tên hàm cũ để không phá các tích hợp/onclick cũ nếu còn tồn tại.
-function exportQuickReportWord(){downloadQuickReportWord()}
+// Tương thích các onclick cũ.
+function downloadQuickReportWord(){return downloadQuickReportPDF()}
+function exportQuickReportWord(){return downloadQuickReportPDF()}
+function exportQuickReportPDF(){return downloadQuickReportPDF()}
+const reportModalEl=document.getElementById('reportModal');
+if(reportModalEl)reportModalEl.addEventListener('click',e=>{if(e.target.id==='reportModal')closeReportPreview()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeReportPreview()});
+
 const reportModalEl=document.getElementById('reportModal');
 if(reportModalEl)reportModalEl.addEventListener('click',e=>{if(e.target.id==='reportModal')closeReportPreview()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeReportPreview()});
