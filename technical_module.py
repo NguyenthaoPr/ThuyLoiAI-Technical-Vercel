@@ -39,7 +39,7 @@ GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "AI_DATA").strip() or "AI_DAT
 GOOGLE_SHEET_GID = os.getenv("GOOGLE_SHEET_GID", "1866404435").strip()
 GOOGLE_SHEETS_RANGE = os.getenv("GOOGLE_SHEETS_RANGE", f"{GOOGLE_SHEET_NAME}!A:K").strip()
 GOOGLE_SHEETS_TIMEOUT = float(os.getenv("GOOGLE_SHEETS_TIMEOUT", "15"))
-GOOGLE_SHEETS_CACHE_SECONDS = float(os.getenv("GOOGLE_SHEETS_CACHE_SECONDS", "30"))
+GOOGLE_SHEETS_CACHE_SECONDS = float(os.getenv("GOOGLE_SHEETS_CACHE_SECONDS", "5"))
 # Cho phép đọc Sheet công khai trực tiếp, không cần Apps Script/Service Account.
 # Nếu Sheet đặt "Bất kỳ ai có liên kết - Người xem", chế độ này hoạt động ngay.
 GOOGLE_SHEETS_PUBLIC = os.getenv("GOOGLE_SHEETS_PUBLIC", "1").strip().lower() in {"1", "true", "yes", "on"}
@@ -231,13 +231,13 @@ def _read_public_sheet_values():
         (
             f"https://docs.google.com/spreadsheets/d/"
             f"{quote(GOOGLE_SHEETS_ID,safe='')}/export?"
-            f"{urlencode({'format':'csv','gid':GOOGLE_SHEET_GID})}",
+            f"{urlencode({'format':'csv','gid':GOOGLE_SHEET_GID,'t':int(datetime.now().timestamp())})}",
             "Google Sheets CSV export"
         ),
         (
             f"https://docs.google.com/spreadsheets/d/"
             f"{quote(GOOGLE_SHEETS_ID,safe='')}/gviz/tq?"
-            f"{urlencode({'tqx':'out:csv','gid':GOOGLE_SHEET_GID})}",
+            f"{urlencode({'tqx':'out:csv','gid':GOOGLE_SHEET_GID,'t':int(datetime.now().timestamp())})}",
             "Google Sheets GViz CSV"
         )
     ]
@@ -386,8 +386,26 @@ def _data_rows(force=False):
         rows.append(row)
     return rows
 
+def _clean_facility_name(value):
+    """Chuẩn hóa tên công trình nhưng GIỮ NGUYÊN dấu tiếng Việt để hiển thị.
+
+    Google Sheets có thể chứa xuống dòng trong cùng một ô, ví dụ:
+    "Trạm Bơm\nĐông Quang". Khi đó so sánh chuỗi tuyệt đối sẽ không khớp
+    với "Trạm Bơm Đông Quang". Hàm này quy về một khoảng trắng duy nhất.
+    """
+    s = "" if value is None else str(value)
+    s = s.replace("\ufeff", "").replace("\u00a0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _facility_key(value):
+    """Khóa so sánh công trình: bỏ khác biệt xuống dòng/khoảng trắng/hoa-thường."""
+    return _norm(_clean_facility_name(value))
+
+
 def _row_facility(row):
-    return str(row[AI_COL_FACILITY]).strip() if len(row)>AI_COL_FACILITY else ""
+    return _clean_facility_name(row[AI_COL_FACILITY]) if len(row)>AI_COL_FACILITY else ""
 
 def _row_parameter(row):
     # Cột H = Thông số (Đơn vị đo): HTL (m), HHL (m), X (mm), ...
@@ -463,8 +481,8 @@ def _rain_total(rainfall):
         if _classify_parameter(item.get("parameter"))=="RAINFALL_C24": c24.extend(item.get("data",[]))
     return round(float(c24[-1]["value"]),3) if c24 else None
 
-def _build_chart(facility, year, days, from_date, to_date, hours=0):
-    rows=[r for r in _data_rows() if _row_facility(r)==facility]
+def _build_chart(facility, year, days, from_date, to_date, hours=0, force=False):
+    rows=[r for r in _data_rows(force=force) if _facility_key(_row_facility(r))==_facility_key(facility)]
 
     # Mốc neo duy nhất cho mọi cửa sổ nhanh.
     latest_dt=None
@@ -1023,7 +1041,8 @@ function localDateStart(v){return v?new Date(v+'T00:00:00'):null}
 function localDateEnd(v){return v?new Date(v+'T23:59:59.999'):null}
 
 
-function setSelectedFacility(){return f.value||'Chưa chọn'}
+function cleanFacilityName(value){return String(value||'').replace(/[\s\u00A0]+/g,' ').trim()}
+function setSelectedFacility(){if(f.value){f.dataset.cleanFacility=cleanFacilityName(f.value)}return f.value||'Chưa chọn'}
 
 let selectedQuickPeriod='7d';
 let chartRequestSerial=0;
@@ -1102,7 +1121,7 @@ function normalizeRawWaterSeries(data){
   }).filter(Boolean);
 }
 
-async function loadParameters(){
+async function loadParameters(force=false){
   if(!f.value){
     currentParameters={waterLevel:[],rainfall:[]};
     selectedWaterParameter='';
@@ -1110,7 +1129,7 @@ async function loadParameters(){
   }
 
   const result=await fetchJson(
-    '/api/parameters?facility='+encodeURIComponent(f.value),
+    '/api/parameters?facility='+encodeURIComponent(cleanFacilityName(f.value))+'&fresh='+(force?'1':'0')+'&ts='+Date.now(),
     {cache:'no-store'},
     1
   );
@@ -1143,7 +1162,7 @@ async function loadParameters(){
   return currentParameters;
 }
 
-async function loadChartData(){
+async function loadChartData(force=false){
   if(!f.value){
     resetData();
     return;
@@ -1159,11 +1178,13 @@ async function loadChartData(){
     const meta=quickPeriodMeta(selectedQuickPeriod);
 
     const params=new URLSearchParams({
-      facility:f.value,
+      facility:cleanFacilityName(f.value),
       year:String(new Date().getFullYear()),
       days:String(meta.days),
       hours:String(meta.hours),
-      waterParameter:selectedWaterParameter||''
+      waterParameter:selectedWaterParameter||'',
+      fresh:force?'1':'0',
+      ts:String(Date.now())
     });
 
     // Custom date là chế độ độc lập và có độ ưu tiên cao nhất.
@@ -1437,98 +1458,97 @@ function buildQuickReportHtml(){
   const peakRain=a.rainPeak?`${formatNumber(a.rainPeak.value)} mm tại ${fmtReportDate(a.rainPeak.time)}`:'—';
   const latestText=a.latest?`${formatNumber(a.latest.value)} m tại ${fmtReportDate(a.latest.time)}`:'—';
   const firstText=a.first?`${formatNumber(a.first.value)} m tại ${fmtReportDate(a.first.time)}`:'—';
-  // Toàn bộ dãy số liệu quan trắc hợp lệ trong khoảng thời gian người dùng chọn.
-  // Ghép thêm lượng mưa theo thời điểm quan trắc mực nước.
+  // Dãy quan trắc trong đúng khoảng thời gian người dùng chọn:
+  // ghép mực nước và lượng mưa theo cùng mốc thời gian.
+  const rainSeries = Array.isArray(d.rainfall) ? d.rainfall : [];
   const rainAtTime = new Map();
-  (Array.isArray(d.rainfall) ? d.rainfall : []).forEach(series => {
+
+  rainSeries.forEach(series => {
+    const name = series.parameter || 'Lượng mưa';
     (Array.isArray(series.data) ? series.data : []).forEach(p => {
       const t = parseDataTime(p.time);
       const v = Number(p.value);
       if (!t || !Number.isFinite(t.getTime()) || !Number.isFinite(v)) return;
       const key = t.getTime();
-      rainAtTime.set(key, (rainAtTime.get(key) || 0) + v);
+      if (!rainAtTime.has(key)) rainAtTime.set(key, {});
+      rainAtTime.get(key)[name] = v;
     });
   });
 
-  // Nếu thời điểm mưa và mực nước không trùng tuyệt đối, tìm số liệu mưa gần nhất
-  // trong cửa sổ ±30 phút. Không dùng giá trị ngoài cửa sổ này để tránh ghép sai kỳ đo.
-  const rainPointsForReport = [];
-  (Array.isArray(d.rainfall) ? d.rainfall : []).forEach(series => {
-    (Array.isArray(series.data) ? series.data : []).forEach(p => {
-      const time = parseDataTime(p.time);
-      const value = Number(p.value);
-      if (time && Number.isFinite(time.getTime()) && Number.isFinite(value)) {
-        rainPointsForReport.push({time, value});
-      }
-    });
+  const rainNames = rainSeries
+    .map(x => x.parameter || 'Lượng mưa')
+    .filter((v, i, arr) => arr.indexOf(v) === i);
+
+  // Tạo hợp các mốc thời gian của mực nước và mưa để không làm mất
+  // một lần đo mưa nếu tại đúng thời điểm đó chưa có số liệu mực nước.
+  const observationTimeMap = new Map();
+  a.pts.forEach(p => {
+    observationTimeMap.set(p.time.getTime(), {time:p.time, water:p.value});
   });
-  rainPointsForReport.sort((a,b) => a.time - b.time);
+  rainAtTime.forEach((_, key) => {
+    if (!observationTimeMap.has(key)) observationTimeMap.set(key, {time:new Date(key), water:null});
+  });
 
-  function rainfallForObservation(time) {
-    if (!(time instanceof Date) || !Number.isFinite(time.getTime())) return null;
-    const exact = rainAtTime.get(time.getTime());
-    if (Number.isFinite(exact)) return exact;
+  const observationPoints = [...observationTimeMap.values()].sort((x,y)=>x.time-y.time);
 
-    const MAX_DIFF = 30 * 60 * 1000;
-    let bestDiff = Infinity;
-    let bestTime = null;
-    rainPointsForReport.forEach(p => {
-      const diff = Math.abs(p.time - time);
-      if (diff <= MAX_DIFF && diff < bestDiff) {
-        bestDiff = diff;
-        bestTime = p.time.getTime();
-      }
-    });
-    if (bestTime === null) return null;
+  let previousWaterPoint = null;
+  const rainHeaders = rainNames.length
+    ? rainNames.map(name => `<th>${escapeHtml(name)} (mm)</th>`).join('')
+    : '<th>Lượng mưa (mm)</th>';
 
-    // Cộng các chuỗi mưa có cùng thời điểm gần nhất.
-    return rainPointsForReport
-      .filter(p => p.time.getTime() === bestTime)
-      .reduce((sum,p) => sum + p.value, 0);
-  }
+  const observationRows = observationPoints.map((p, i) => {
+    const hasWater = Number.isFinite(Number(p.water));
+    let hours = null, delta = null, rate = null;
 
-  const observationRows = a.pts.map((p, i) => {
-    const prev = i > 0 ? a.pts[i - 1] : null;
-    const hours = prev ? (p.time - prev.time) / 3600000 : null;
-    const delta = prev ? p.value - prev.value : null;
-    const rate = (prev && hours > 0) ? delta / hours : null;
-    const rain = rainfallForObservation(p.time);
+    if (hasWater && previousWaterPoint) {
+      hours = (p.time - previousWaterPoint.time) / 3600000;
+      delta = Number(p.water) - Number(previousWaterPoint.water);
+      rate = hours > 0 ? delta / hours : null;
+    }
 
-    return `<tr>
+    const rainValues = rainNames.length
+      ? rainNames.map(name => {
+          const values = rainAtTime.get(p.time.getTime()) || {};
+          const v = Number(values[name]);
+          return `<td>${Number.isFinite(v) ? formatNumber(v) : '—'}</td>`;
+        }).join('')
+      : '<td>—</td>';
+
+    const row = `<tr>
       <td>${i + 1}</td>
       <td>${escapeHtml(fmtReportDate(p.time))}</td>
-      <td>${formatNumber(p.value)} m</td>
-      <td>${rain === null ? '—' : formatNumber(rain) + ' mm'}</td>
+      <td>${hasWater ? formatNumber(p.water) + ' m' : '—'}</td>
+      ${rainValues}
       <td>${delta === null ? '—' : (delta >= 0 ? '+' : '') + formatNumber(delta) + ' m'}</td>
       <td>${hours === null ? '—' : formatNumber(hours, 1) + ' giờ'}</td>
       <td>${rate === null ? '—' : (rate >= 0 ? '+' : '') + formatNumber(rate, 3) + ' m/giờ'}</td>
     </tr>`;
+
+    if (hasWater) previousWaterPoint = p;
+    return row;
   }).join('');
 
-  const observationTable = a.pts.length ? `
+  const observationTable = observationPoints.length ? `
     <table class="observation-table">
-      <thead>
-        <tr>
-          <th>STT</th>
-          <th>Thời gian quan trắc</th>
-          <th>Mực nước H</th>
-          <th>Lượng mưa</th>
-          <th>ΔH so với lần trước</th>
-          <th>Khoảng cách đo</th>
-          <th>Tốc độ biến đổi</th>
-        </tr>
-      </thead>
+      <thead><tr>
+        <th>STT</th>
+        <th>Thời gian quan trắc</th>
+        <th>Mực nước H</th>
+        ${rainHeaders}
+        <th>ΔH so với lần trước</th>
+        <th>Khoảng cách đo</th>
+        <th>Tốc độ biến đổi</th>
+      </tr></thead>
       <tbody>${observationRows}</tbody>
     </table>
-    <p class="note">Dãy số liệu gồm toàn bộ các lần quan trắc mực nước hợp lệ trong khoảng thời gian đã chọn và lượng mưa tương ứng. Lượng mưa được ưu tiên ghép đúng thời điểm; nếu thời gian không trùng tuyệt đối, hệ thống chỉ lấy lần đo mưa gần nhất trong phạm vi ±30 phút. ΔH và tốc độ biến đổi được tính từ hai lần quan trắc mực nước liên tiếp.</p>
+    <p class="note">Dãy số liệu gồm toàn bộ các mốc quan trắc hợp lệ trong khoảng thời gian đã chọn. Mực nước và lượng mưa được ghép theo cùng thời điểm; dấu “—” nghĩa là tại mốc đó không có giá trị tương ứng. ΔH và tốc độ biến đổi chỉ tính giữa hai lần quan trắc mực nước liên tiếp.</p>
   ` : '<p>Không có số liệu quan trắc hợp lệ trong khoảng thời gian đã chọn.</p>';
-
   const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.45;color:#111}h1{text-align:center;font-size:17pt;margin:0 0 8px}h2{font-size:13pt;margin:16px 0 6px;border-bottom:1px solid #777;padding-bottom:3px}p{margin:5px 0}table{border-collapse:collapse;width:100%;margin:7px 0}th,td{border:1px solid #777;padding:6px;text-align:left;vertical-align:top}th{font-weight:bold;background:#eee}.observation-table{font-size:9.5pt}.observation-table th,.observation-table td{padding:4px 5px}.observation-table thead{display:table-header-group}.observation-table tr{page-break-inside:avoid}.meta td:first-child{width:28%;font-weight:bold}.note{font-style:italic;color:#444}.footer{margin-top:22px;font-size:9pt;color:#555}</style></head><body>
 <h1>BÁO CÁO NHANH DIỄN BIẾN MỰC NƯỚC – LƯỢNG MƯA</h1>
 <table class="meta"><tr><td>Công trình</td><td>${escapeHtml(facility)}</td></tr><tr><td>Thời gian</td><td>Từ ${escapeHtml(a.r.from)} đến ${escapeHtml(a.r.to)}</td></tr><tr><td>Ngày lập báo cáo</td><td>${fmtReportDate(new Date())}</td></tr></table>
 <h2>1. Tổng hợp số liệu quan trắc</h2><table><tr><th>Nội dung</th><th>Kết quả</th></tr>
 <tr><td>Số lần đo mực nước</td><td>${a.pts.length} lần</td></tr><tr><td>Mực nước đầu kỳ</td><td>${escapeHtml(firstText)}</td></tr><tr><td>Mực nước mới nhất</td><td>${escapeHtml(latestText)}</td></tr><tr><td>Mực nước thấp nhất</td><td>${a.min!==null?formatNumber(a.min)+' m':'—'}</td></tr><tr><td>Mực nước cao nhất</td><td>${a.max!==null?formatNumber(a.max)+' m':'—'}</td></tr><tr><td>Biến động đầu kỳ → cuối kỳ</td><td>${trendText(a.increase)}</td></tr><tr><td>Tăng lớn nhất giữa hai lần đo</td><td>${a.maxRise!==null?trendText(a.maxRise):'—'}</td></tr><tr><td>Giảm lớn nhất giữa hai lần đo</td><td>${a.maxDrop!==null?trendText(a.maxDrop):'—'}</td></tr><tr><td>2–3 lần đo gần nhất</td><td>${a.recent.length} lần đo · Phân tích theo thời gian thực giữa các lần đo</td></tr><tr><td>Tăng/giảm lần đo gần nhất</td><td>${a.recentDelta!==null?trendText(a.recentDelta)+' trong '+formatNumber(a.lastInterval.hours,1)+' giờ':'—'}</td></tr><tr><td>Tốc độ biến đổi gần nhất</td><td>${a.recentRate!==null?(a.recentRate>=0?'+':'')+formatNumber(a.recentRate,3)+' m/giờ':'—'}</td></tr><tr><td>Tốc độ xu hướng 2–3 lần đo</td><td>${a.trendSlope!==null?(a.trendSlope>=0?'+':'')+formatNumber(a.trendSlope,3)+' m/giờ':'—'} · ${escapeHtml(a.trendMethod)}</td></tr><tr><td>Xu hướng 24 giờ</td><td>${trendText(a.trend24)}</td></tr><tr><td>Xu hướng 3 ngày</td><td>${trendText(a.trend72)}</td></tr><tr><td>Xu hướng 7 ngày</td><td>${trendText(a.trend168)}</td></tr><tr><td>Tổng lượng mưa</td><td>${formatNumber(a.totalRain)} mm</td></tr><tr><td>Lượng mưa lớn nhất ghi nhận</td><td>${escapeHtml(peakRain)}</td></tr></table>
-<h2>1A. Dãy số liệu quan trắc trong thời gian chọn</h2>${observationTable}
+<h2>1A. Dãy số liệu mực nước – lượng mưa trong thời gian chọn</h2>${observationTable}
  <h2>2. So sánh mực nước với MNDBT, MNDGC</h2><table><tr><th>Ngưỡng</th><th>Giá trị</th><th>Chênh lệch với H mới nhất</th><th>Đánh giá</th></tr>
 <tr><td>MNDBT</td><td>${Number.isFinite(a.bt)?formatNumber(a.bt)+' m':'—'}</td><td>${marginBT!==null?(marginBT>=0?'+':'')+formatNumber(marginBT)+' m':'—'}</td><td>${a.latest&&Number.isFinite(a.bt)?(a.latest.value>=a.bt?'Đạt/vượt MNDBT':'Thấp hơn MNDBT'):'Chưa đủ dữ liệu'}</td></tr>
 <tr><td>MNDGC</td><td>${Number.isFinite(a.gc)?formatNumber(a.gc)+' m':'—'}</td><td>${marginGC!==null?(marginGC>=0?'+':'')+formatNumber(marginGC)+' m':'—'}</td><td>${a.latest&&Number.isFinite(a.gc)?(a.latest.value>=a.gc?'CHẠM/VƯỢT MNDGC':'Chưa vượt MNDGC'):'Chưa đủ dữ liệu'}</td></tr></table>
@@ -2308,16 +2328,41 @@ f.addEventListener('change',async()=>{
 async function refreshModule(){
   if(!f.value){setSelectedFacility();resetData();return}
   setSelectedFacility();
-  try{await fetchJson('/api/connection?ts='+Date.now(),{cache:'no-store'},0)}catch(e){}
-  await loadParameters();
-  await loadChartData();
+  state.textContent='Đang cập nhật số liệu thực...';
+  stateDetail.textContent='Đang đọc mới AI_DATA từ Google Sheets';
+  try{
+    const connection=await fetchJson('/api/connection?ts='+Date.now(),{cache:'no-store'},1);
+    if(!connection.google_sheets_ok){
+      throw new Error(connection.google_sheets_error||connection.message||'Không đọc được AI_DATA.');
+    }
+    await loadParameters(true);
+    await loadChartData(true);
+  }catch(e){
+    console.error('Cập nhật số liệu thực thất bại:',e);
+    setDataError(e.message||'Không cập nhật được số liệu thực từ Google Sheets.');
+  }
 }
 selectedQuickPeriod='7d';
 setQuickButtonsActive('7d');
 period.value=quickPeriodMeta('7d').value;
 
+let liveRefreshTimer=null;
+function startLiveRefresh(){
+  if(liveRefreshTimer)clearInterval(liveRefreshTimer);
+  liveRefreshTimer=setInterval(async()=>{
+    if(!f.value)return;
+    const from=document.getElementById('fromDate')?.value||'';
+    const to=document.getElementById('toDate')?.value||'';
+    // Không tự động thay đổi báo cáo lịch sử khi người dùng đang chọn khoảng ngày.
+    if(from||to)return;
+    try{ await loadChartData(true); }
+    catch(err){ console.warn('Live refresh:',err); }
+  },60000);
+}
+
 (async()=>{
   await loadFacilities();
+  startLiveRefresh();
   /*
    * Không cần thao tác thủ công nếu Google Sheet vừa thức dậy/chậm phản hồi.
    * Chỉ kiểm tra lại khi dropdown vẫn chưa có công trình.
@@ -2340,7 +2385,7 @@ period.value=quickPeriodMeta('7d').value;
 @app.get("/api/facilities")
 def api_facilities():
     try:
-        rows=_data_rows(); seen=[]; seen_set=set()
+        rows=_data_rows(force=True); seen=[]; seen_set=set()
         for row in rows:
             name=_row_facility(row)
             if name and name not in seen_set:
@@ -2350,9 +2395,9 @@ def api_facilities():
         return JSONResponse(status_code=502,content={"ok":False,"source":"google_sheets","error":str(exc)})
 
 @app.get("/api/parameters")
-def api_parameters(facility: str):
+def api_parameters(facility: str, fresh: int=0):
     try:
-        rows=[r for r in _data_rows() if _row_facility(r)==facility]
+        rows=[r for r in _data_rows(force=bool(fresh)) if _facility_key(_row_facility(r))==_facility_key(facility)]
         water=[];rain=[];other=[]
         for r in rows:
             p=_row_parameter(r)
@@ -2365,14 +2410,14 @@ def api_parameters(facility: str):
         return JSONResponse(status_code=502,content={"ok":False,"source":"google_sheets","error":str(exc)})
 
 @app.get("/api/chart")
-def api_chart(facility: str, year: int=2026, days: int=7, hours: int=0, waterParameter: str="", rainfallParameters: str="", fromDate: str="", toDate: str=""):
+def api_chart(facility: str, year: int=2026, days: int=7, hours: int=0, waterParameter: str="", rainfallParameters: str="", fromDate: str="", toDate: str="", fresh: int=0, ts: str=""):
     try:
-        data=_build_chart(facility,year,days,fromDate,toDate,hours)
+        data=_build_chart(facility,year,days,fromDate,toDate,hours,force=bool(fresh))
         # Nếu client chỉ yêu cầu một tên mực nước cụ thể và tên đó tồn tại, dùng tên đó.
         if waterParameter:
-            rows=[r for r in _data_rows() if _row_facility(r)==facility and _row_parameter(r)==waterParameter]
+            rows=[r for r in _data_rows(force=bool(fresh)) if _facility_key(_row_facility(r))==_facility_key(facility) and _row_parameter(r)==waterParameter]
             if rows:
-                facility_rows=[r for r in _data_rows() if _row_facility(r)==facility]
+                facility_rows=[r for r in _data_rows(force=bool(fresh)) if _facility_key(_row_facility(r))==_facility_key(facility)]
                 latest=None
                 for r in facility_rows:
                     dt=_row_datetime(r,year)
