@@ -1461,9 +1461,22 @@ function reportPlainTextFromHtml(html){
   box.innerHTML=html;
   return (box.innerText||box.textContent||'').trim();
 }
+function exportFileStamp(){
+  const d=new Date();
+  const pad=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
 function reportFileName(){
   const facility=currentData?.facility||f.value||'Cong_trinh';
-  return `Bao_cao_nhanh_${String(facility).replace(/[^a-zA-Z0-9À-ỹ _-]/g,'_')}_${exportFileStamp()}.doc`;
+  const safeFacility=String(facility)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .replace(/đ/g,'d').replace(/Đ/g,'D')
+    .replace(/[^a-zA-Z0-9 _-]/g,'_')
+    .replace(/\s+/g,'_')
+    .replace(/_+/g,'_')
+    .replace(/^_+|_+$/g,'') || 'Cong_trinh';
+  return `Bao_cao_nhanh_${safeFacility}_${exportFileStamp()}.doc`;
 }
 function requireQuickReport(){
   const html=buildQuickReportHtml();
@@ -1483,32 +1496,77 @@ function closeReportPreview(){
 async function shareQuickReportZalo(){
   const html=requireQuickReport();if(!html)return;
   const text=reportPlainTextFromHtml(html);
-  const file=new File(['\ufeff',html],reportFileName(),{type:'application/msword'});
+  const fileName=reportFileName();
+  const file=new File(['\ufeff',html],fileName,{type:'application/msword'});
+  const title='Báo cáo nhanh - '+(currentData?.facility||f.value||'');
+
+  // Điện thoại/trình duyệt có Web Share: cho phép chọn Zalo và gửi trực tiếp
+  // cả nội dung hoặc file nếu hệ điều hành hỗ trợ chia sẻ file.
   try{
-    if(navigator.share){
-      if(navigator.canShare&&navigator.canShare({files:[file]})){
-        await navigator.share({title:'Báo cáo nhanh - '+(currentData?.facility||f.value||''),text:'Báo cáo nhanh Thủy lợi',files:[file]});
+    if(typeof navigator.share==='function'){
+      if(typeof navigator.canShare==='function' && navigator.canShare({files:[file]})){
+        await navigator.share({title,text:'Báo cáo nhanh Thủy lợi',files:[file]});
         return;
       }
-      await navigator.share({title:'Báo cáo nhanh - '+(currentData?.facility||f.value||''),text:text.slice(0,6000)});
+      await navigator.share({title,text:text.slice(0,6000)});
       return;
     }
   }catch(err){
     if(err&&err.name==='AbortError')return;
-    console.warn('Không thể dùng Web Share:',err);
+    console.warn('Web Share không khả dụng:',err);
   }
+
+  // Desktop: trình duyệt không được phép tự động gửi tin nhắn/file vào
+  // tài khoản Zalo. Chuẩn bị file + sao chép nội dung + mở Zalo Web.
   try{
-    if(navigator.clipboard)await navigator.clipboard.writeText(text.slice(0,10000));
+    const blob=new Blob(['\ufeff',html],{type:'application/msword;charset=utf-8'});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement('a');
+    link.href=url;link.download=fileName;
+    document.body.appendChild(link);link.click();link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }catch(err){
+    console.warn('Không thể chuẩn bị file báo cáo:',err);
+  }
+
+  let copied=false;
+  try{
+    if(navigator.clipboard&&window.isSecureContext){
+      await navigator.clipboard.writeText(text.slice(0,10000));
+      copied=true;
+    }else{
+      const ta=document.createElement('textarea');
+      ta.value=text.slice(0,10000);
+      ta.style.position='fixed';ta.style.left='-9999px';
+      document.body.appendChild(ta);ta.select();
+      copied=document.execCommand('copy');
+      ta.remove();
+    }
   }catch(err){console.warn('Clipboard không khả dụng:',err)}
-  alert('Đã chuẩn bị nội dung Báo cáo nhanh. Hãy chọn Zalo trong bảng Chia sẻ; nếu trình duyệt không hỗ trợ chia sẻ tệp, nội dung báo cáo đã được sao chép để bạn dán vào Zalo.');
+
   window.open('https://chat.zalo.me/','_blank','noopener,noreferrer');
+  alert(copied
+    ? 'Đã tải Báo cáo và sao chép nội dung. Zalo Web đã được mở — chọn người nhận rồi dán nội dung hoặc đính kèm file báo cáo để gửi.'
+    : 'Đã tải Báo cáo và mở Zalo Web. Hãy chọn người nhận rồi đính kèm file báo cáo hoặc sao chép nội dung để gửi.');
 }
 function downloadQuickReportWord(){
   const html=requireQuickReport();if(!html)return;
-  const blob=new Blob(['\ufeff',html],{type:'application/msword;charset=utf-8'});
-  const url=URL.createObjectURL(blob),link=document.createElement('a');
-  link.href=url;link.download=reportFileName();document.body.appendChild(link);link.click();link.remove();
-  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  try{
+    const fileName=reportFileName();
+    const blob=new Blob(['\ufeff',html],{type:'application/msword;charset=utf-8'});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement('a');
+    link.href=url;
+    link.download=fileName;
+    link.style.display='none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1500);
+  }catch(err){
+    console.error('Tải Báo cáo nhanh thất bại:',err);
+    alert('Không thể tạo file Báo cáo nhanh trên trình duyệt này.');
+  }
 }
 // Giữ tên hàm cũ để không phá các tích hợp/onclick cũ nếu còn tồn tại.
 function exportQuickReportWord(){downloadQuickReportWord()}
