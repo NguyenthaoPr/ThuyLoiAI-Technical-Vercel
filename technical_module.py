@@ -1618,8 +1618,6 @@ const reportModalEl=document.getElementById('reportModal');
 if(reportModalEl)reportModalEl.addEventListener('click',e=>{if(e.target.id==='reportModal')closeReportPreview()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeReportPreview()});
 
-const reportModalEl=document.getElementById('reportModal');
-if(reportModalEl)reportModalEl.addEventListener('click',e=>{if(e.target.id==='reportModal')closeReportPreview()});
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeReportPreview()});
 
 function renderTechnicalSummary(data,series){
