@@ -22,13 +22,13 @@ except ImportError:  # pragma: no cover
     GoogleAuthRequest = None
 
 # ============================================================
-# THUY LOI AI - TECHNICAL MODULE V2.8.2
+# THUY LOI AI - TECHNICAL MODULE V2.8.3
 # DIRECT GOOGLE SHEETS - KHONG DUNG APPS SCRIPT
 # Doc truc tiep AI_DATA bang Google Sheets API.
 # Khong ghi/sua/xoa du lieu Google Sheet.
 # ============================================================
 
-app = FastAPI(title="THUY LOI AI - Thong so ky thuat", version="2.8.2")
+app = FastAPI(title="THUY LOI AI - Thong so ky thuat", version="2.8.3")
 
 GOOGLE_SHEETS_ID = os.getenv(
     "GOOGLE_SHEETS_ID",
@@ -2409,6 +2409,200 @@ def api_parameters(facility: str, fresh: int=0):
     except RuntimeError as exc:
         return JSONResponse(status_code=502,content={"ok":False,"source":"google_sheets","error":str(exc)})
 
+
+@app.get("/api/live")
+def api_live(facility: str, year: int=2026, fresh: int=1, ts: str=""):
+    """
+    Số liệu quan trắc mới nhất của một công trình từ AI_DATA.
+    Chỉ đọc Google Sheets; không ghi/sửa/xóa dữ liệu.
+    Dùng cùng semantic dictionary và quy tắc chọn thông số của /api/chart.
+    """
+    try:
+        rows=[
+            r for r in _data_rows(force=bool(fresh))
+            if _facility_key(_row_facility(r)) == _facility_key(facility)
+        ]
+
+        # Nếu client gửi tên có khác biệt xuống dòng/khoảng trắng, trả về tên chuẩn
+        # đang có trong AI_DATA.
+        canonical = _row_facility(rows[0]) if rows else _clean_facility_name(facility)
+        if not rows:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "ok": False,
+                    "source": "google_sheets",
+                    "facility": canonical,
+                    "error": "Không tìm thấy công trình trong AI_DATA."
+                }
+            )
+
+        parsed=[]
+        latest_overall=None
+        for r in rows:
+            dt=_row_datetime(r, year)
+            value=_row_value(r)
+            parameter=_row_parameter(r)
+            if dt is None or value is None or not parameter:
+                continue
+            item={
+                "parameter": parameter,
+                "code": _classify_parameter(parameter),
+                "value": value,
+                "time": dt.isoformat()
+            }
+            parsed.append(item)
+            if latest_overall is None or dt > latest_overall:
+                latest_overall=dt
+
+        water_names=[]
+        rainfall_names=[]
+        for item in parsed:
+            code=item["code"]
+            if code in {"WATER_LEVEL","WATER_LEVEL_UPSTREAM","WATER_LEVEL_DOWNSTREAM"}:
+                if item["parameter"] not in water_names:
+                    water_names.append(item["parameter"])
+            elif code in {"RAINFALL","RAINFALL_T1","RAINFALL_C24"}:
+                if item["parameter"] not in rainfall_names:
+                    rainfall_names.append(item["parameter"])
+
+        # Cùng quy tắc /api/chart: HTL trước H cho hồ/đập.
+        water_name=_pick_water_name(water_names)
+
+        # Nếu có HTL/HHL, /api/live ưu tiên HTL cho giá trị chính.
+        water_priority=["WATER_LEVEL_UPSTREAM","WATER_LEVEL","WATER_LEVEL_DOWNSTREAM"]
+        water_candidates=[
+            x for x in parsed
+            if x["code"] in {"WATER_LEVEL","WATER_LEVEL_UPSTREAM","WATER_LEVEL_DOWNSTREAM"}
+        ]
+
+        water=None
+        if water_name:
+            named=[x for x in water_candidates if x["parameter"] == water_name]
+            if named:
+                water=max(named, key=lambda x: x["time"])
+        if water is None and water_candidates:
+            water=max(
+                water_candidates,
+                key=lambda x: (
+                    water_priority.index(x["code"]) if x["code"] in water_priority else 99,
+                    x["time"]
+                )
+            )
+
+        # Mưa: X -> X T1 -> X C24. Trong cùng loại lấy bản ghi mới nhất.
+        rain_priority=["RAINFALL","RAINFALL_T1","RAINFALL_C24"]
+        rainfall=None
+        for code in rain_priority:
+            candidates=[x for x in parsed if x["code"] == code]
+            if candidates:
+                rainfall=max(candidates, key=lambda x: x["time"])
+                break
+
+        limits=_limits(rows)
+        h=water["value"] if water else None
+        mndbt=limits.get("mndbt")
+        mndgc=limits.get("mndgc")
+
+        if h is None:
+            status={
+                "level":"info",
+                "label":"Chưa có dữ liệu mực nước",
+                "message":"Chưa tìm thấy mực nước hợp lệ trong AI_DATA."
+            }
+        elif mndgc is not None and h > mndgc:
+            status={
+                "level":"danger",
+                "label":"Mực nước vượt MNDGC",
+                "message":f"Mực nước {h:g} m, cao hơn MNDGC {mndgc:g} m."
+            }
+        elif mndbt is not None and h >= mndbt:
+            status={
+                "level":"warning",
+                "label":"Mực nước từ MNDBT trở lên",
+                "message":f"Mực nước {h:g} m, MNDBT {mndbt:g} m."
+            }
+        elif mndbt is not None:
+            status={
+                "level":"normal",
+                "label":"Mực nước dưới MNDBT",
+                "message":f"Mực nước {h:g} m, MNDBT {mndbt:g} m."
+            }
+        else:
+            status={
+                "level":"normal",
+                "label":"Có dữ liệu quan trắc mới nhất",
+                "message":"Đã đọc được số liệu quan trắc mới nhất từ AI_DATA."
+            }
+
+        def _clean_item(item):
+            if not item:
+                return None
+            return {
+                "parameter": item["parameter"],
+                "code": item["code"],
+                "value": item["value"],
+                "time": item["time"]
+            }
+
+        return {
+            "ok": True,
+            "source": "google_sheets",
+            "facility": canonical,
+            "year": year,
+            "updated_at": latest_overall.isoformat() if latest_overall else None,
+            "updated_label": latest_overall.strftime("%d/%m/%Y %H:%M") if latest_overall else "",
+            "status": status,
+            "water_level": _clean_item(water),
+            "rainfall": _clean_item(rainfall),
+            "limits": {
+                "MNDBT": mndbt,
+                "MNDGC": mndgc
+            },
+            "parameters": sorted(
+                {
+                    x["parameter"]
+                    for x in parsed
+                }
+            ),
+            "water_levels": [
+                _clean_item(x)
+                for x in sorted(
+                    water_candidates,
+                    key=lambda x: x["time"],
+                    reverse=True
+                )
+            ][:20],
+            "rainfalls": [
+                _clean_item(x)
+                for x in sorted(
+                    [x for x in parsed if x["code"] in {"RAINFALL","RAINFALL_T1","RAINFALL_C24"}],
+                    key=lambda x: x["time"],
+                    reverse=True
+                )
+            ][:20],
+            "sheet": GOOGLE_SHEET_NAME,
+            "range": GOOGLE_SHEETS_RANGE
+        }
+    except RuntimeError as exc:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "ok": False,
+                "source": "google_sheets",
+                "error": str(exc)
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "source": "technical_module",
+                "error": str(exc)
+            }
+        )
+
 @app.get("/api/chart")
 def api_chart(facility: str, year: int=2026, days: int=7, hours: int=0, waterParameter: str="", rainfallParameters: str="", fromDate: str="", toDate: str="", fresh: int=0, ts: str=""):
     try:
@@ -2483,7 +2677,7 @@ def technical_dashboard(): return HTML
 
 @app.get("/health")
 def health():
-    return {"module":"technical_module","version":"2.7.0","status":"ok","stage":7,"mode":"direct_google_sheets","sheet":GOOGLE_SHEET_NAME}
+    return {"module":"technical_module","version":"2.8.3","status":"ok","stage":7,"mode":"direct_google_sheets","sheet":GOOGLE_SHEET_NAME}
 
 if __name__ == "__main__":
     import uvicorn
