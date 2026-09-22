@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 import base64
 import json
@@ -29,6 +30,16 @@ except ImportError:  # pragma: no cover
 # ============================================================
 
 app = FastAPI(title="THUY LOI AI - Thong so ky thuat", version="2.8.3")
+
+# CORS: cho phep THUY LOI AI (GitHub Pages/Vercel) doc /api/live va cac API ky thuat.
+# Khong thay doi logic Google Sheets hay cac endpoint hien co.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 GOOGLE_SHEETS_ID = os.getenv(
     "GOOGLE_SHEETS_ID",
@@ -404,6 +415,100 @@ def _facility_key(value):
     return _norm(_clean_facility_name(value))
 
 
+# ============================================================
+# FACILITY NAME RESOLVER
+# ------------------------------------------------------------
+# AI_DATA và GIS không bắt buộc phải dùng cùng một tên hiển thị.
+# Ví dụ:
+#   Hồ Phú Ninh              <-> Hồ Phú Ninh (C24)
+#   Hồ Phú Ninh              <-> Hồ chứa nước Phú Ninh
+#   Trạm Bơm\nĐông Quang      <-> Trạm Bơm Đông Quang
+#
+# Resolver này CHỈ dùng để tìm đúng bản ghi; không sửa tên gốc
+# trong Google Sheets, không đổi tên hiển thị của Technical Module.
+# ============================================================
+_FACILITY_CODE_RE = re.compile(r"(?:\(|\[)\s*([A-Za-zÀ-ỹĐđ0-9][A-Za-zÀ-ỹĐđ0-9._-]{0,15})\s*(?:\)|\])", re.I)
+_FACILITY_PREFIXES = (
+    "ho chua nuoc", "ho chua", "ho",
+    "tram bom", "tram", "dap", "cong", "kenh"
+)
+
+def _facility_code(value):
+    """Lấy mã công trình trong ngoặc, ví dụ (C24), (H17)."""
+    s=_clean_facility_name(value)
+    m=_FACILITY_CODE_RE.search(s)
+    return _norm(m.group(1)) if m else ""
+
+
+def _facility_core(value):
+    """Tên lõi để đối chiếu GIS/AI_DATA mà không fuzzy-match tùy tiện."""
+    s=_clean_facility_name(value)
+    s=_FACILITY_CODE_RE.sub(" ",s)
+    n=_norm(s)
+    for prefix in _FACILITY_PREFIXES:
+        if n.startswith(prefix + " "):
+            n=n[len(prefix):].strip()
+            break
+    return re.sub(r"\s+"," ",n).strip()
+
+
+def _facility_match_score(requested, candidate):
+    """Điểm khớp tên công trình; 0 = không khớp."""
+    req=_facility_key(requested)
+    cand=_facility_key(candidate)
+    if not req or not cand:
+        return 0
+    if req==cand:
+        return 100
+
+    req_code=_facility_code(requested)
+    cand_code=_facility_code(candidate)
+    if req_code and cand_code and req_code==cand_code:
+        return 98
+
+    req_no_code=_norm(_FACILITY_CODE_RE.sub(" ",_clean_facility_name(requested)))
+    cand_no_code=_norm(_FACILITY_CODE_RE.sub(" ",_clean_facility_name(candidate)))
+    if req_no_code==cand_no_code:
+        return 96
+
+    req_core=_facility_core(requested)
+    cand_core=_facility_core(candidate)
+    if req_core and cand_core and req_core==cand_core:
+        return 90
+
+    return 0
+
+
+def _resolve_facility_rows(rows, requested):
+    """Trả về (các dòng khớp, tên AI_DATA, phương thức khớp)."""
+    requested_clean=_clean_facility_name(requested)
+    best_score=0
+    best_name=""
+    names=[]
+    seen=set()
+    for row in rows:
+        name=_row_facility(row)
+        key=_facility_key(name)
+        if name and key not in seen:
+            seen.add(key)
+            names.append(name)
+
+    for name in names:
+        score=_facility_match_score(requested_clean,name)
+        if score>best_score:
+            best_score=score
+            best_name=name
+            if score==100:
+                break
+
+    if not best_name:
+        return [], "", "none"
+
+    matched=[r for r in rows if _facility_key(_row_facility(r))==_facility_key(best_name)]
+    method={100:"exact",98:"code",96:"without_code",90:"core"}.get(best_score,"resolved")
+    return matched,best_name,method
+
+
 def _row_facility(row):
     return _clean_facility_name(row[AI_COL_FACILITY]) if len(row)>AI_COL_FACILITY else ""
 
@@ -482,7 +587,8 @@ def _rain_total(rainfall):
     return round(float(c24[-1]["value"]),3) if c24 else None
 
 def _build_chart(facility, year, days, from_date, to_date, hours=0, force=False):
-    rows=[r for r in _data_rows(force=force) if _facility_key(_row_facility(r))==_facility_key(facility)]
+    all_rows=_data_rows(force=force)
+    rows,_,_= _resolve_facility_rows(all_rows,facility)
 
     # Mốc neo duy nhất cho mọi cửa sổ nhanh.
     latest_dt=None
@@ -2397,7 +2503,8 @@ def api_facilities():
 @app.get("/api/parameters")
 def api_parameters(facility: str, fresh: int=0):
     try:
-        rows=[r for r in _data_rows(force=bool(fresh)) if _facility_key(_row_facility(r))==_facility_key(facility)]
+        all_rows=_data_rows(force=bool(fresh))
+        rows,_,_= _resolve_facility_rows(all_rows,facility)
         water=[];rain=[];other=[]
         for r in rows:
             p=_row_parameter(r)
@@ -2418,14 +2525,12 @@ def api_live(facility: str, year: int=2026, fresh: int=1, ts: str=""):
     Dùng cùng semantic dictionary và quy tắc chọn thông số của /api/chart.
     """
     try:
-        rows=[
-            r for r in _data_rows(force=bool(fresh))
-            if _facility_key(_row_facility(r)) == _facility_key(facility)
-        ]
+        all_rows=_data_rows(force=bool(fresh))
+        rows,canonical,match_method=_resolve_facility_rows(all_rows,facility)
 
-        # Nếu client gửi tên có khác biệt xuống dòng/khoảng trắng, trả về tên chuẩn
-        # đang có trong AI_DATA.
-        canonical = _row_facility(rows[0]) if rows else _clean_facility_name(facility)
+        # Nếu client gửi tên có khác biệt về cách gọi (ví dụ bỏ mã (C24),
+        # "Hồ"/"Hồ chứa nước"), resolver trả về tên chuẩn đang có trong AI_DATA.
+        canonical = canonical or _clean_facility_name(facility)
         if not rows:
             return JSONResponse(
                 status_code=404,
@@ -2549,6 +2654,8 @@ def api_live(facility: str, year: int=2026, fresh: int=1, ts: str=""):
             "ok": True,
             "source": "google_sheets",
             "facility": canonical,
+            "requested_facility": _clean_facility_name(facility),
+            "match_method": match_method,
             "year": year,
             "updated_at": latest_overall.isoformat() if latest_overall else None,
             "updated_label": latest_overall.strftime("%d/%m/%Y %H:%M") if latest_overall else "",
@@ -2609,9 +2716,10 @@ def api_chart(facility: str, year: int=2026, days: int=7, hours: int=0, waterPar
         data=_build_chart(facility,year,days,fromDate,toDate,hours,force=bool(fresh))
         # Nếu client chỉ yêu cầu một tên mực nước cụ thể và tên đó tồn tại, dùng tên đó.
         if waterParameter:
-            rows=[r for r in _data_rows(force=bool(fresh)) if _facility_key(_row_facility(r))==_facility_key(facility) and _row_parameter(r)==waterParameter]
+            all_rows=_data_rows(force=bool(fresh))
+            facility_rows,_,_= _resolve_facility_rows(all_rows,facility)
+            rows=[r for r in facility_rows if _row_parameter(r)==waterParameter]
             if rows:
-                facility_rows=[r for r in _data_rows(force=bool(fresh)) if _facility_key(_row_facility(r))==_facility_key(facility)]
                 latest=None
                 for r in facility_rows:
                     dt=_row_datetime(r,year)
