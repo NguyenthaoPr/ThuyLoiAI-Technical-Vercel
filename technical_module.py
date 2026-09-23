@@ -1920,7 +1920,7 @@ async function renderReservoirState(facility, waterLevel, limits){
         '<span class="reservoir-chip"><b>Trạng thái:</b> '+escapeHtml(stateLabel)+'</span>'+
       '</div>'+
       '<div class="reservoir-foot">Nguồn đường quan hệ: '+escapeHtml(result.source_module||'VBA')+
-      ' · Thuật toán: nội suy tuyến tính từng đoạn · Khoảng Z: '+
+      ' · Thuật toán: '+escapeHtml(result.algorithm||'VBA')+' · Khoảng Z: '+
       n(result.curve_range?.z_min_m)+'–'+n(result.curve_range?.z_max_m)+' m'+
       ' · Xử lý biên: '+escapeHtml(result.out_of_range_policy||'—')+'</div>';
   }catch(err){
@@ -2617,6 +2617,26 @@ def api_reservoir_state(facility: str, waterLevel: float, fresh: int = 0):
         return result
     except RuntimeError as exc:
         return JSONResponse(status_code=502, content={"ok": False, "error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+@app.get("/api/reservoir-catalog")
+def api_reservoir_catalog():
+    try:
+        if calculate_state is None:
+            raise RuntimeError("Reservoir Engine chưa được tải.")
+        from reservoir_engine import catalog
+        return {"ok": True, "data": catalog(), "count": len(catalog())}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+@app.get("/api/reservoir-z-from-volume")
+def api_reservoir_z_from_volume(facility: str, volume: float):
+    try:
+        if calculate_state is None:
+            raise RuntimeError("Reservoir Engine chưa được tải.")
+        from reservoir_engine import calculate_z_from_volume
+        return calculate_z_from_volume(facility, float(volume))
     except Exception as exc:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
