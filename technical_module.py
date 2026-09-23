@@ -9,6 +9,11 @@ import re
 import threading
 from datetime import datetime, timedelta
 from time import monotonic
+
+try:
+    from reservoir_engine import calculate_state
+except Exception:
+    calculate_state = None
 from urllib.parse import quote, urlencode
 import urllib.request
 import csv
@@ -1000,6 +1005,25 @@ tbody tr{transition:background .15s}tbody tr:hover{background:color-mix(in srgb,
   .date-box{padding:9px 9px}
   .date-box label{font-size:9px}
 }
+
+.reservoir-panel{overflow:hidden}
+.engine-badge{font-size:10px;font-weight:900;letter-spacing:.4px;padding:7px 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface2);color:var(--muted)}
+.engine-badge.on{color:var(--ok);border-color:rgba(21,148,93,.35);background:rgba(21,148,93,.08)}
+.engine-badge.off{color:var(--warn)}
+.reservoir-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.reservoir-stat{position:relative;min-height:92px;padding:14px;border:1px solid var(--line);border-radius:15px;background:linear-gradient(145deg,var(--surface2),var(--surface));overflow:hidden}
+.reservoir-stat::after{content:"";position:absolute;right:-25px;bottom:-30px;width:80px;height:80px;border-radius:50%;background:rgba(18,167,216,.08)}
+.reservoir-stat .r-label{font-size:10px;font-weight:850;color:var(--muted);letter-spacing:.35px}
+.reservoir-stat .r-value{font-size:22px;font-weight:950;margin-top:7px;letter-spacing:-.3px}
+.reservoir-stat .r-unit{font-size:11px;color:var(--muted);margin-top:2px}
+.reservoir-stat.emphasis{border-color:rgba(8,120,201,.28);background:linear-gradient(145deg,rgba(8,120,201,.08),var(--surface))}
+.reservoir-meta{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
+.reservoir-chip{border:1px solid var(--line);background:var(--surface2);border-radius:999px;padding:7px 10px;font-size:11px;color:var(--muted)}
+.reservoir-chip b{color:var(--text)}
+.reservoir-foot{margin-top:12px;padding-top:10px;border-top:1px solid var(--line);font-size:10px;color:var(--muted)}
+@media(max-width:900px){.reservoir-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.reservoir-grid{grid-template-columns:1fr 1fr}.reservoir-stat .r-value{font-size:18px}.reservoir-meta{gap:5px}.reservoir-chip{padding:6px 8px}}
+
 </style>
 </head>
 
@@ -1074,6 +1098,19 @@ tbody tr{transition:background .15s}tbody tr:hover{background:color-mix(in srgb,
       <div class="chart-wrap"><canvas id="hydroChart"></canvas></div>
     </div>
 
+  </section>
+
+  <section class="panel reservoir-panel" style="margin-top:16px">
+    <div class="head">
+      <div>
+        <div class="head-title">Thông số hồ chứa · Z–F–V</div>
+        <div class="head-sub">Tự động tính từ mực nước thực tế bằng đường quan hệ và nội suy tuyến tính của bộ VBA gốc.</div>
+      </div>
+      <span id="reservoirEngineBadge" class="engine-badge">ENGINE OFF</span>
+    </div>
+    <div id="reservoirState" class="panel-body">
+      <div class="empty">Chọn hồ chứa để tính toán thông số Z–F–V.</div>
+    </div>
   </section>
 
   <section class="panel" style="margin-top:16px">
@@ -1377,7 +1414,7 @@ function renderData(data){
   mndbt.textContent=data.limits&&data.limits.mndbt!=null?formatNumber(data.limits.mndbt):'—';
   mndgc.textContent=data.limits&&data.limits.mndgc!=null?formatNumber(data.limits.mndgc):'—';
   rainTotal.textContent=data.totalRainfall!=null?formatNumber(data.totalRainfall):'—';
-  evaluateAlert(data,latest);updateKpiState(data,latest);renderTechnicalSummary(data,waterSeries);
+  evaluateAlert(data,latest);updateKpiState(data,latest);renderTechnicalSummary(data,waterSeries); renderReservoirState(f.value, latest?Number(latest.value):NaN, data.limits);
   try{renderHydroChart(data)}catch(chartErr){
     console.warn('Biểu đồ chưa tải được:',chartErr);
     const canvas=document.getElementById('hydroChart');
@@ -1821,6 +1858,77 @@ if(reportModalEl)reportModalEl.addEventListener('click',e=>{if(e.target.id==='re
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeReportPreview()});
 
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeReportPreview()});
+
+
+let reservoirRequestSerial = 0;
+
+async function renderReservoirState(facility, waterLevel, limits){
+  const box=document.getElementById('reservoirState');
+  const badge=document.getElementById('reservoirEngineBadge');
+  if(!box||!badge)return;
+  const requestId=++reservoirRequestSerial;
+  if(!Number.isFinite(Number(waterLevel))){
+    badge.textContent='ENGINE OFF'; badge.className='engine-badge off';
+    box.innerHTML='<div class="empty">Chưa có mực nước hợp lệ để tính Z–F–V.</div>';
+    return;
+  }
+  badge.textContent='ĐANG TÍNH'; badge.className='engine-badge';
+  box.innerHTML='<div class="empty">Đang tính thông số từ đường quan hệ hồ chứa…</div>';
+  try{
+    const params=new URLSearchParams({
+      facility:cleanFacilityName(facility),
+      waterLevel:String(Number(waterLevel)),
+      fresh:'0',
+      ts:String(Date.now())
+    });
+    const result=await fetchJson('/api/reservoir-state?'+params.toString(),{},1);
+    if(requestId!==reservoirRequestSerial)return;
+    if(!result?.ok){
+      throw new Error(result?.error||'Reservoir Engine không trả về kết quả.');
+    }
+    badge.textContent='ENGINE ON'; badge.className='engine-badge on';
+
+    const n=v=>Number.isFinite(Number(v))?formatNumber(Number(v)): '—';
+    const volume=result.volume_million_m3;
+    const area=result.area_km2;
+    const fill=result.fill_percent_vs_mndbt;
+    const remaining=result.remaining_to_mndbt_m3!=null
+      ?Number(result.remaining_to_mndbt_m3)/1000000:null;
+    const dz=result.limits?.MNDBT!=null
+      ?Number(result.limits.MNDBT)-Number(result.water_level_m):null;
+
+    const stateLabel={
+      below_mndbt:'Dưới MNDBT',
+      between_mndbt_mndgc:'Từ MNDBT đến MNDGC',
+      above_mndgc:'Trên MNDGC',
+      at_or_above_mndbt:'Từ MNDBT trở lên',
+      unknown:'Chưa đủ ngưỡng'
+    }[result.technical_state]||'—';
+
+    box.innerHTML=
+      '<div class="reservoir-grid">'+
+        '<div class="reservoir-stat emphasis"><div class="r-label">MỰC NƯỚC Z</div><div class="r-value">'+n(result.water_level_m)+'</div><div class="r-unit">m</div></div>'+
+        '<div class="reservoir-stat"><div class="r-label">DUNG TÍCH V</div><div class="r-value">'+n(volume)+'</div><div class="r-unit">triệu m³</div></div>'+
+        '<div class="reservoir-stat"><div class="r-label">DIỆN TÍCH F</div><div class="r-value">'+n(area)+'</div><div class="r-unit">km²</div></div>'+
+        '<div class="reservoir-stat"><div class="r-label">TỶ LỆ / MNDBT</div><div class="r-value">'+n(fill)+'</div><div class="r-unit">%</div></div>'+
+      '</div>'+
+      '<div class="reservoir-meta">'+
+        '<span class="reservoir-chip"><b>MNDBT:</b> '+n(result.limits?.MNDBT)+' m</span>'+
+        '<span class="reservoir-chip"><b>MNDGC:</b> '+n(result.limits?.MNDGC)+' m</span>'+
+        '<span class="reservoir-chip"><b>Còn đến MNDBT:</b> '+n(remaining)+' triệu m³</span>'+
+        '<span class="reservoir-chip"><b>Khoảng Z đến MNDBT:</b> '+n(dz)+' m</span>'+
+        '<span class="reservoir-chip"><b>Trạng thái:</b> '+escapeHtml(stateLabel)+'</span>'+
+      '</div>'+
+      '<div class="reservoir-foot">Nguồn đường quan hệ: '+escapeHtml(result.source_module||'VBA')+
+      ' · Thuật toán: nội suy tuyến tính từng đoạn · Khoảng Z: '+
+      n(result.curve_range?.z_min_m)+'–'+n(result.curve_range?.z_max_m)+' m'+
+      ' · Xử lý biên: '+escapeHtml(result.out_of_range_policy||'—')+'</div>';
+  }catch(err){
+    if(requestId!==reservoirRequestSerial)return;
+    badge.textContent='ENGINE LỖI'; badge.className='engine-badge off';
+    box.innerHTML='<div class="empty">'+escapeHtml(err.message||'Không tính được thông số hồ chứa.')+'</div>';
+  }
+}
 
 function renderTechnicalSummary(data,series){
   const latest=series.length?series[series.length-1]:null,previous=series.length>1?series[series.length-2]:null;
@@ -2487,6 +2595,30 @@ function startLiveRefresh(){
 </body>
 </html>
 '''
+
+
+@app.get("/api/reservoir-state")
+def api_reservoir_state(facility: str, waterLevel: float, fresh: int = 0):
+    """Tính Z -> F/V và các chỉ số dung tích theo đường quan hệ VBA gốc."""
+    try:
+        if calculate_state is None:
+            raise RuntimeError("Reservoir Engine chưa được tải.")
+        all_rows = _data_rows(force=bool(fresh))
+        facility_rows, canonical, match_method = _resolve_facility_rows(all_rows, facility)
+        limits = _limits(facility_rows)
+        result = calculate_state(facility, float(waterLevel), limits)
+        result.update({
+            "requested_facility": _clean_facility_name(facility),
+            "facility": canonical or _clean_facility_name(facility),
+            "match_method": match_method,
+            "source": "legacy_vba_curves",
+            "sheet": GOOGLE_SHEET_NAME,
+        })
+        return result
+    except RuntimeError as exc:
+        return JSONResponse(status_code=502, content={"ok": False, "error": str(exc)})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
 @app.get("/api/facilities")
 def api_facilities():
