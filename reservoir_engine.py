@@ -6,6 +6,10 @@ from __future__ import annotations
 import json, os, re, unicodedata
 from bisect import bisect_right
 from typing import Any, Dict, Optional
+try:
+    from reservoir_q_engine import calculate_spillway_q
+except Exception:
+    calculate_spillway_q = None
 
 _BASE=os.path.dirname(__file__)
 with open(os.path.join(_BASE,"reservoir_curves.json"),"r",encoding="utf-8") as f:
@@ -116,6 +120,7 @@ def calculate_state(facility:str,water_level:float,limits:Optional[Dict[str,Any]
         meta=CURVES[key]; f,fmode,v,vmode,zmin,zmax=_modern_state(meta,z)
     else:
         meta=LEGACY[key]; f,fmode,v,vmode,zmin,zmax=_legacy_state(meta,z)
+    q_result = calculate_spillway_q(key, z) if calculate_spillway_q else {"ok":False,"available":False,"q_m3s":None,"reason":"q_engine_unavailable"}
     result={
       "ok":True,"reservoir_id":key,"reservoir":meta.get("name",facility),
       "source_module":meta.get("source_module","CodeZFV2027.xla"),
@@ -126,6 +131,8 @@ def calculate_state(facility:str,water_level:float,limits:Optional[Dict[str,Any]
       "interpolation":{"area":fmode,"volume":vmode},
       "curve_range":{"z_min_m":zmin,"z_max_m":zmax},
       "calculation_engine":"VBA-port-2027",
+      "spillway_q": q_result,
+      "spillway_state": ("spilling" if q_result.get("q_m3s") is not None and float(q_result.get("q_m3s") or 0) > 0 else ("below_threshold" if q_result.get("available") else "not_configured")),
     }
     limits=limits or {}; mndbt=limits.get("mndbt");mndgc=limits.get("mndgc")
     result["limits"]={"MNDBT":mndbt,"MNDGC":mndgc}
