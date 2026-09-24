@@ -28,13 +28,13 @@ except ImportError:  # pragma: no cover
     GoogleAuthRequest = None
 
 # ============================================================
-# THUY LOI AI - TECHNICAL MODULE V2.8.3
+# THUY LOI AI - TECHNICAL MODULE V3.0.0
 # DIRECT GOOGLE SHEETS - KHONG DUNG APPS SCRIPT
 # Doc truc tiep AI_DATA bang Google Sheets API.
 # Khong ghi/sua/xoa du lieu Google Sheet.
 # ============================================================
 
-app = FastAPI(title="THUY LOI AI - Thong so ky thuat", version="2.8.3")
+app = FastAPI(title="THUY LOI AI - Thong so ky thuat", version="3.0.0")
 
 # CORS: cho phep THUY LOI AI (GitHub Pages/Vercel) doc /api/live va cac API ky thuat.
 # Khong thay doi logic Google Sheets hay cac endpoint hien co.
@@ -1010,17 +1010,20 @@ tbody tr{transition:background .15s}tbody tr:hover{background:color-mix(in srgb,
 .engine-badge{font-size:10px;font-weight:900;letter-spacing:.4px;padding:7px 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface2);color:var(--muted)}
 .engine-badge.on{color:var(--ok);border-color:rgba(21,148,93,.35);background:rgba(21,148,93,.08)}
 .engine-badge.off{color:var(--warn)}
-.reservoir-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.reservoir-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
 .reservoir-stat{position:relative;min-height:92px;padding:14px;border:1px solid var(--line);border-radius:15px;background:linear-gradient(145deg,var(--surface2),var(--surface));overflow:hidden}
 .reservoir-stat::after{content:"";position:absolute;right:-25px;bottom:-30px;width:80px;height:80px;border-radius:50%;background:rgba(18,167,216,.08)}
 .reservoir-stat .r-label{font-size:10px;font-weight:850;color:var(--muted);letter-spacing:.35px}
 .reservoir-stat .r-value{font-size:22px;font-weight:950;margin-top:7px;letter-spacing:-.3px}
 .reservoir-stat .r-unit{font-size:11px;color:var(--muted);margin-top:2px}
 .reservoir-stat.emphasis{border-color:rgba(8,120,201,.28);background:linear-gradient(145deg,rgba(8,120,201,.08),var(--surface))}
+.reservoir-stat.q-active{border-color:rgba(211,58,58,.38);background:linear-gradient(145deg,rgba(211,58,58,.08),var(--surface))}
+.reservoir-stat.q-active .r-value{color:#c93434}
 .reservoir-meta{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
 .reservoir-chip{border:1px solid var(--line);background:var(--surface2);border-radius:999px;padding:7px 10px;font-size:11px;color:var(--muted)}
 .reservoir-chip b{color:var(--text)}
 .reservoir-foot{margin-top:12px;padding-top:10px;border-top:1px solid var(--line);font-size:10px;color:var(--muted)}
+@media(max-width:1100px){.reservoir-grid{grid-template-columns:repeat(3,1fr)}}
 @media(max-width:900px){.reservoir-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:560px){.reservoir-grid{grid-template-columns:1fr 1fr}.reservoir-stat .r-value{font-size:18px}.reservoir-meta{gap:5px}.reservoir-chip{padding:6px 8px}}
 
@@ -1103,13 +1106,13 @@ tbody tr{transition:background .15s}tbody tr:hover{background:color-mix(in srgb,
   <section class="panel reservoir-panel" style="margin-top:16px">
     <div class="head">
       <div>
-        <div class="head-title">Thông số hồ chứa · Z–F–V</div>
-        <div class="head-sub">Tự động tính từ mực nước thực tế bằng đường quan hệ và nội suy tuyến tính của bộ VBA gốc.</div>
+        <div class="head-title">Thông số hồ chứa · Z–F–V–Q</div>
+        <div class="head-sub">Tự động tính từ mực nước thực tế theo đường quan hệ Z–F–V và quan hệ Q qua tràn từ bộ VBA gốc.</div>
       </div>
       <span id="reservoirEngineBadge" class="engine-badge">ENGINE OFF</span>
     </div>
     <div id="reservoirState" class="panel-body">
-      <div class="empty">Chọn hồ chứa để tính toán thông số Z–F–V.</div>
+      <div class="empty">Chọn hồ chứa để tính toán thông số Z–F–V–Q.</div>
     </div>
   </section>
 
@@ -1119,7 +1122,7 @@ tbody tr{transition:background .15s}tbody tr:hover{background:color-mix(in srgb,
   </section>
 
 
-  <div class="footer">THUY LOI AI · Technical Module V2.0.0 · Smart Control Room · Google Sheets Direct · Dashboard kỹ thuật</div>
+  <div class="footer">THUY LOI AI · Technical Module V3.0.0 · Z–F–V–Q · Smart Control Room · Google Sheets Direct</div>
 </main>
 
 <script>
@@ -1869,7 +1872,7 @@ async function renderReservoirState(facility, waterLevel, limits){
   const requestId=++reservoirRequestSerial;
   if(!Number.isFinite(Number(waterLevel))){
     badge.textContent='ENGINE OFF'; badge.className='engine-badge off';
-    box.innerHTML='<div class="empty">Chưa có mực nước hợp lệ để tính Z–F–V.</div>';
+    box.innerHTML='<div class="empty">Chưa có mực nước hợp lệ để tính Z–F–V–Q.</div>';
     return;
   }
   badge.textContent='ĐANG TÍNH'; badge.className='engine-badge';
@@ -1911,6 +1914,7 @@ async function renderReservoirState(facility, waterLevel, limits){
         '<div class="reservoir-stat"><div class="r-label">DUNG TÍCH V</div><div class="r-value">'+n(volume)+'</div><div class="r-unit">triệu m³</div></div>'+
         '<div class="reservoir-stat"><div class="r-label">DIỆN TÍCH F</div><div class="r-value">'+n(area)+'</div><div class="r-unit">km²</div></div>'+
         '<div class="reservoir-stat"><div class="r-label">TỶ LỆ / MNDBT</div><div class="r-value">'+n(fill)+'</div><div class="r-unit">%</div></div>'+
+        '<div class="reservoir-stat '+(Number(result.spillway_q?.q_m3s||0)>0?'q-active':'')+'"><div class="r-label">LƯU LƯỢNG Q QUA TRÀN</div><div class="r-value">'+(result.spillway_q?.q_m3s!=null?n(result.spillway_q.q_m3s):'—')+'</div><div class="r-unit">m³/s</div></div>'+
       '</div>'+
       '<div class="reservoir-meta">'+
         '<span class="reservoir-chip"><b>MNDBT:</b> '+n(result.limits?.MNDBT)+' m</span>'+
@@ -1918,15 +1922,18 @@ async function renderReservoirState(facility, waterLevel, limits){
         '<span class="reservoir-chip"><b>Còn đến MNDBT:</b> '+n(remaining)+' triệu m³</span>'+
         '<span class="reservoir-chip"><b>Khoảng Z đến MNDBT:</b> '+n(dz)+' m</span>'+
         '<span class="reservoir-chip"><b>Trạng thái:</b> '+escapeHtml(stateLabel)+'</span>'+
+        '<span class="reservoir-chip"><b>Q tràn:</b> '+(result.spillway_q?.available ? n(result.spillway_q.q_m3s)+' m³/s' : 'Chưa có quan hệ Q')+'</span>'+
+        '<span class="reservoir-chip"><b>Trạng thái tràn:</b> '+(result.spillway_state==='spilling'?'Đang tràn':result.spillway_state==='below_threshold'?'Chưa tràn':'Chưa cấu hình')+'</span>'+
       '</div>'+
-      '<div class="reservoir-foot">Nguồn đường quan hệ: '+escapeHtml(result.source_module||'VBA')+
+      '<div class="reservoir-foot">Nguồn Z–F–V: '+escapeHtml(result.source_module||'VBA')+
       ' · Thuật toán: '+escapeHtml(result.algorithm||'VBA')+' · Khoảng Z: '+
       n(result.curve_range?.z_min_m)+'–'+n(result.curve_range?.z_max_m)+' m'+
-      ' · Xử lý biên: '+escapeHtml(result.out_of_range_policy||'—')+'</div>';
+      ' · Xử lý biên: '+escapeHtml(result.out_of_range_policy||'—')+
+      ' · Q: '+escapeHtml(result.spillway_q?.source_module||'chưa cấu hình')+' · '+escapeHtml(result.spillway_q?.algorithm||'—')+'</div>';
   }catch(err){
     if(requestId!==reservoirRequestSerial)return;
     badge.textContent='ENGINE LỖI'; badge.className='engine-badge off';
-    box.innerHTML='<div class="empty">'+escapeHtml(err.message||'Không tính được thông số hồ chứa.')+'</div>';
+    box.innerHTML='<div class="empty">'+escapeHtml(err.message||'Không tính được thông số Z–F–V–Q hồ chứa.')+'</div>';
   }
 }
 
@@ -2620,6 +2627,23 @@ def api_reservoir_state(facility: str, waterLevel: float, fresh: int = 0):
     except Exception as exc:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+@app.get("/api/reservoir-q")
+def api_reservoir_q(facility: str, waterLevel: float):
+    """Tính riêng Q qua tràn tự do theo CodeQtran2027.xla."""
+    try:
+        from reservoir_q_engine import calculate_spillway_q
+        key = None
+        try:
+            from reservoir_engine import resolve_reservoir
+            key = resolve_reservoir(facility)
+        except Exception:
+            key = facility
+        result = calculate_spillway_q(key or facility, float(waterLevel))
+        result.update({"facility": facility, "water_level_m": float(waterLevel), "source": "CodeQtran2027.xla"})
+        return result
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
 @app.get("/api/reservoir-catalog")
 def api_reservoir_catalog():
     try:
@@ -2937,7 +2961,7 @@ def technical_dashboard(): return HTML
 
 @app.get("/health")
 def health():
-    return {"module":"technical_module","version":"2.8.3","status":"ok","stage":7,"mode":"direct_google_sheets","sheet":GOOGLE_SHEET_NAME}
+    return {"module":"technical_module","version":"3.0.0","status":"ok","stage":7,"mode":"direct_google_sheets","sheet":GOOGLE_SHEET_NAME}
 
 if __name__ == "__main__":
     import uvicorn
